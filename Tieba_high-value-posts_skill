@@ -1,12 +1,8 @@
-
-
-# Skill: 贴吧精华帖智能评选与加精助手
+# Skill: 贴吧精华帖智能评选与加精助手（API版）
 
 ## Description
 
-自动访问用户指定的百度贴吧，抓取近期帖子，基于 U-M-A 内容价值三角模型筛选出值得加精的优质内容，生成结构化评选报告，并在用户确认后**自动执行加精操作**。运行于浏览器环境中，当遇到扫码登录拦截时，主动提醒用户完成登录操作。
-
-**技术适配说明：当前百度贴吧为 Vue SPA 架构，本 Skill 所有数据获取与管理操作均适配新版贴吧，不使用任何旧版/经典版路径。**
+通过百度贴吧 API 接口，自动获取用户指定贴吧的近期帖子，基于 U-M-A 内容价值三角模型筛选出值得加精的优质内容，生成结构化评选报告，并在用户确认后**通过 API 直接执行加精操作**。无需浏览器 DOM 操作，速度更快、稳定性更高。需要用户提供管理员账号的 BDUSS cookie 作为认证凭据。
 
 ---
 
@@ -29,181 +25,230 @@
 
 ## Input
 
-- tiebaname: string - 必填，目标贴吧名称（例如："反抓虾"、"机械键盘"、"图拉丁之家"）
-- auto_jajing: boolean - 可选，是否在评选完成后自动执行加精操作（默认 false，需用户逐条确认）
+- tiebaname: string — 必填，目标贴吧名称（例如："反抓虾"、"机械键盘"、"图拉丁之家"）
+- bduss: string — 必填，管理员账号的 BDUSS cookie 值（用于 API 认证）
+- auto_jajing: boolean — 可选，是否在评选完成后自动执行加精操作（默认 false，需用户逐条确认）
+
+---
+
+## Core API Reference
+
+本 Skill 全程通过以下百度贴吧 API 完成所有操作，不依赖浏览器环境：
+
+### API 1：登录验证 & 获取 TBS
+
+```
+GET http://tieba.baidu.com/dc/common/tbs
+Cookie: BDUSS={bduss}
+
+成功响应：{"is_login": 1, "tbs": "xxxxxx"}
+失败响应：{"is_login": 0}
+```
+
+### API 2：获取贴吧 FID
+
+```
+GET http://tieba.baidu.com/f/commit/share/fnameShareApi?fname={tiebaname}&ie=utf-8
+Cookie: BDUSS={bduss}
+
+成功响应：{"data": {"fid": 12345678}}
+```
+
+### API 3：获取帖子列表
+
+```
+GET https://tieba.baidu.com/mo/q/newmoindex?word={tiebaname}&pn={page}&rn=30
+Cookie: BDUSS={bduss}
+
+返回字段：thread_list[] → 每个元素含 id, title, author.name, reply_num, is_good, 
+abstract（摘要）, create_time 等
+```
+
+### API 4：获取帖子详情内容
+
+```
+GET https://tieba.baidu.com/mo/q/misread?tid={thread_id}&fid={fid}
+Cookie: BDUSS={bduss}
+
+或备选移动端 API：
+GET https://tieba.baidu.com/mo/q/m?kz={thread_id}&pn=1
+Cookie: BDUSS={bduss}
+
+返回：帖子正文内容、楼层列表、图片URL、点赞数等
+```
+
+### API 5：执行加精操作
+
+```
+POST https://tieba.baidu.com/mo/q/bawusetthread
+Cookie: BDUSS={bduss}
+Content-Type: application/x-www-form-urlencoded
+
+Body:
+  word={tiebaname}    — 贴吧名
+  fid={fid}           — 贴吧ID
+  tid={thread_id}     — 帖子ID
+  type=1              — 1=加精, 0=取消加精
+  tbs={tbs}           — CSRF Token
+
+成功响应：{"no": 0, "error": ""}
+失败响应：{"no": 非0, "error": "错误描述"}
+```
 
 ---
 
 ## Workflow
 
-### Phase 0：页面访问与登录状态检测
+### Phase 0：认证初始化与 BDUSS 获取
 
 ```
-1. 通过浏览器导航至目标贴吧页面：
-   https://tieba.baidu.com/f?kw={tiebaname}
+1. 检查用户是否已提供 BDUSS：
 
-   ⚠️ 当前贴吧为 Vue SPA 新版，不存在"切换经典版"入口，
-      不要尝试访问 lp=5011、bawu/admin 等旧版路径。
+   ┌─ 场景A：用户直接提供了 BDUSS ─────────────────────┐
+   │                                                     │
+   │  → 直接使用，进入验证步骤                           │
+   └─────────────────────────────────────────────────────┘
 
-2. 页面加载后，检测是否出现登录拦截：
-   - 检查页面中是否存在扫码登录弹窗 / 登录遮罩层
-   - 检查关键元素：二维码图片、"请登录"/"扫码登录" 文字提示
-   - 检查页面主体内容是否被遮挡或为空
+   ┌─ 场景B：用户未提供 BDUSS ──────────────────────────┐
+   │                                                     │
+   │  向用户展示获取指引：                               │
+   │                                                     │
+   │  ⚠️ 需要您提供 BDUSS                               │
+   │                                                     │
+   │  BDUSS 是百度的登录凭据，获取方式：                 │
+   │                                                     │
+   │  1. 用 Chrome 浏览器登录 tieba.baidu.com            │
+   │  2. 按 F12 打开开发者工具                           │
+   │  3. 切换到 Application → Cookies                    │
+   │     → https://tieba.baidu.com                       │
+   │  4. 找到 BDUSS 字段，复制其完整值                   │
+   │  5. 将值发送给我                                    │
+   │                                                     │
+   │  🔒 安全说明：                                      │
+   │  - BDUSS 等同于登录密码，仅在本次会话中使用        │
+   │  - 任务完成后不会存储或传输到任何第三方             │
+   │  - 建议任务完成后修改百度密码使旧 BDUSS 失效       │
+   │                                                     │
+   │  请提供您的 BDUSS：                                 │
+   └─────────────────────────────────────────────────────┘
 
-3. 🚨 如果检测到登录拦截 → 立即执行【登录提醒流程】：
+   等待用户输入 → 获取后继续
 
-   ┌─────────────────────────────────────────────────┐
-   │  ⚠️ 需要您的操作                                 │
-   │                                                   │
-   │  百度贴吧要求扫码登录才能继续访问。               │
-   │  请您在浏览器中完成以下操作：                     │
-   │                                                   │
-   │  1. 打开手机百度APP                               │
-   │  2. 扫描页面上的二维码                            │
-   │  3. 在手机上确认登录                              │
-   │  4. 等待页面自动跳转                              │
-   │                                                   │
-   │  ✅ 登录完成后我将自动继续执行任务。              │
-   └─────────────────────────────────────────────────┘
+2. 调用认证 API 验证 BDUSS 有效性：
 
-   - 暂停任务执行
-   - 轮询检测页面状态变化（登录弹窗消失 / 帖子列表出现）
-   - 检测到登录成功 → 自动恢复任务，继续 Phase 1
+   请求：GET http://tieba.baidu.com/dc/common/tbs
+         Cookie: BDUSS={bduss}
 
-4. 如果无需登录 → 直接进入 Phase 1
+   判定：
+   ✅ 响应 is_login == 1 → 保存 tbs，输出：
+      "✅ 登录验证成功，TBS 已获取：{tbs前6位}***"
+      → 进入 Phase 1
+
+   ❌ 响应 is_login == 0 → 输出：
+      "❌ BDUSS 无效或已过期，请重新获取"
+      → 终止任务或要求用户重新提供
 ```
 
-### Phase 1：权限预检
+### Phase 1：贴吧定位与权限预检
 
 ```
-1. 在帖子列表页，导航至任一帖子详情页
-   https://tieba.baidu.com/p/{any_thread_id}
+1. 获取贴吧 FID：
 
-2. 检测管理权限 — 使用 Vue 实例探测法：
+   请求：GET http://tieba.baidu.com/f/commit/share/fnameShareApi
+         ?fname={tiebaname}&ie=utf-8
+         Cookie: BDUSS={bduss}
 
-   在浏览器中执行 JavaScript：
+   判定：
+   ✅ 成功获取 fid → 记录，输出：
+      "📋 贴吧「{tiebaname}」定位成功，FID: {fid}"
 
-   var moreBtn = document.querySelector('.action-bar-container.action-bar .more-action');
-   if (!moreBtn) {
-     // 无 more-action 按钮 → 无管理权限
-     return { hasPermission: false };
-   }
-   var el = moreBtn;
-   while (el && el.tagName !== 'BODY') {
-     if (el.__vue__) {
-       var parent = el.__vue__.$parent;
-       if (parent && parent.permissionList) {
-         var hasGood = parent.permissionList.some(
-           item => item.action === 'good'
-         );
-         return {
-           hasPermission: hasGood,
-           permissionList: parent.permissionList
-         };
-       }
-       break;
-     }
-     el = el.parentElement;
-   }
+   ❌ fid 为空或请求失败 →
+      "❌ 未找到贴吧「{tiebaname}」，请确认名称是否正确"
+      → 给出相似贴吧名建议（如有），终止任务
 
-3. 权限判定：
+2. 权限预检（通过试探性 API 调用验证）：
 
-   ✅ permissionList 中包含 action === 'good'
-      → 记录权限状态，继续 Phase 2
+   方式：获取帖子列表后，取第一个非精华帖的 tid，
+        发送一个 type=1 的加精请求（实际执行加精），
+        根据返回判断权限：
 
-   ❌ 无 .more-action 元素，或 permissionList 中不含 'good'
-      → 提示用户：
+   ⚠️ 优化方案 — 不真正加精，而是用已加精帖子做取消再恢复：
+   
+   或更安全的方式：直接在 Phase 4 加精时根据 API 返回判断权限，
+   首次加精失败且 error 含"权限"/"没有管理"等关键词 → 判定无权限
+
+   简化处理：
+   → 跳过独立权限预检步骤
+   → 在 Phase 4 首次执行加精时，根据 API 返回结果判定权限
+   → 如果首次返回权限错误，立即暂停并提示用户：
 
    ┌─────────────────────────────────────────────────┐
    │  ⚠️ 权限不足                                     │
    │                                                   │
-   │  当前账号在「{tiebaname}吧」没有吧务管理权限，   │
-   │  无法执行加精操作。                               │
+   │  当前 BDUSS 对应的账号在「{tiebaname}吧」        │
+   │  没有吧务管理权限，无法执行加精操作。             │
    │                                                   │
-   │  我可以继续为您完成内容评选并生成报告，           │
-   │  但加精操作需要您手动执行或使用有权限的账号。     │
+   │  API 返回：{error_message}                        │
    │                                                   │
-   │  是否继续仅评选模式？(Y/N)                        │
+   │  我已完成内容评选并生成报告（见上方），            │
+   │  但加精操作需要吧主/小吧主权限的账号。            │
+   │                                                   │
+   │  是否仅保留评选报告？(Y/N)                        │
    └─────────────────────────────────────────────────┘
+
+   → 进入 Phase 2
 ```
 
-### Phase 2：数据获取（API 优先 + 两阶段筛选）
+### Phase 2：数据获取
 
 ```
-═══════════════════════════════════════════════════════════
-策略说明
-═══════════════════════════════════════════════════════════
+1. 调用帖子列表 API，翻页获取近3天帖子：
 
-优先使用 Tieba Claw API 获取帖子列表和详情，比浏览器 DOM 解析
-快 10 倍且稳定。仅在 API 不可用时降级为浏览器页面解析。
+   逐页请求：
+   GET https://tieba.baidu.com/mo/q/newmoindex
+       ?word={tiebaname}&pn=1&rn=30
+       Cookie: BDUSS={bduss}
 
-采用「两阶段筛选」减少不必要的详情页访问：
-  阶段 A：用列表数据初筛（标题 + 回复数 + 时间）
-  阶段 B：仅对通过初筛的帖子获取正文详情
+   翻页策略：pn=1,2,3... 直到帖子发布时间超出3天范围
 
-═══════════════════════════════════════════════════════════
-阶段 A：获取帖子列表 & 初筛
-═══════════════════════════════════════════════════════════
+2. 从每页响应的 thread_list[] 中提取：
 
-方案一（优先）：Tieba Claw API
+   对每个帖子对象提取：
+   ┌──────────────────────────────────────────────┐
+   │  tid         ← thread.id                     │
+   │  title       ← thread.title                  │
+   │  author      ← thread.author.name            │
+   │  reply_num   ← thread.reply_num              │
+   │  is_good     ← thread.is_good ("0"/"1")      │
+   │  create_time ← thread.create_time            │
+   │  abstract    ← thread.abstract (摘要/预览)    │
+   │  url         ← https://tieba.baidu.com/p/{tid}│
+   └──────────────────────────────────────────────┘
 
-  在浏览器中执行 fetch 请求：
+3. 对每个候选帖子，调用详情 API 获取完整内容：
 
-  // 获取帖子列表（第1页，按时间排序）
-  const listResp = await fetch(
-    'https://tieba.baidu.com/c/f/frs/page_claw?kw={tiebaname}&sort_type=0&pn=1',
-    { credentials: 'include' }
-  );
-  const listData = await listResp.json();
+   请求：GET https://tieba.baidu.com/mo/q/m?kz={tid}&pn=1
+         Cookie: BDUSS={bduss}
 
-  // listData 中包含帖子列表，每个帖子有：
-  //   id (thread_id), title, reply_num, create_time, 
-  //   is_good (是否已加精) 等字段
+   提取：
+   - 主楼正文全文（HTML 转纯文本）
+   - 配图 URL 列表及数量
+   - 点赞数
+   - 正文字符长度
 
-  如需更多帖子，翻页 pn=2, pn=3...
+4. 过滤规则：
 
-方案二（降级）：浏览器页面 bodyText 解析
+   排除以下帖子，不进入评估阶段：
+   ┌──────────────────────────────────────────────┐
+   │  ❌ is_good == "1"  → 已是精华帖（标记跳过） │
+   │  ❌ 正文 < 10字 且 无图  → 纯水贴            │
+   │  ❌ 标题含 "广告"/"出售"/"代购" → 广告帖     │
+   │  ❌ create_time > 3天前  → 超出时间范围       │
+   └──────────────────────────────────────────────┘
 
-  如果 API 返回错误或数据为空：
-  - 在已加载的贴吧列表页提取帖子信息
-  - 使用 document.body.innerText 或 bodyText 解析
-  - ⚠️ 新版 Vue SPA 的 DOM 结构与旧版不同，
-    不要使用 .j_thread_list / .threadlist_title 等旧版选择器
-
-初筛过滤规则：
-  ✅ 保留：近3天内发布的帖子
-  ❌ 排除：
-    - is_good === true（已是精华帖）
-    - 标题明显为广告/水帖
-    - 回复数为 0 且标题少于 5 字
-
-═══════════════════════════════════════════════════════════
-阶段 B：获取帖子详情（仅对通过初筛的帖子）
-═══════════════════════════════════════════════════════════
-
-方案一（优先）：Tieba Claw API
-
-  const detailResp = await fetch(
-    'https://tieba.baidu.com/c/f/pb/page_claw?kz={thread_id}&pn=1',
-    { credentials: 'include' }
-  );
-  const detailData = await detailResp.json();
-
-  // 提取主楼正文、配图、互动数据等
-
-方案二（降级）：浏览器导航到详情页
-
-  导航至 https://tieba.baidu.com/p/{thread_id}
-  从页面中提取正文内容
-
-汇总提取字段：
-  - 标题
-  - 正文内容
-  - 配图描述（如有）
-  - 发布时间
-  - 回复数 / 点赞数等互动数据
-  - 帖子 URL：https://tieba.baidu.com/p/{thread_id}
-  - 是否已加精
+   输出：
+   "📥 数据获取完成：共扫描 XX 篇，过滤后 XX 篇进入评估，
+    已跳过精华 XX 篇、水贴 XX 篇、广告 XX 篇"
 ```
 
 ### Phase 3：逐贴评估（U-M-A 三维打分）
@@ -215,6 +260,21 @@
 | U | 有用性 Utility | 是否提供干货、教程、数据评测、问题解决方案 | #实操步骤 #避坑指南 #数据支撑 #工具推荐 |
 | M | 有梗性 Meme | 是否造梗、引发情绪共鸣、自嘲、使用社区黑话 | #自黑自嘲 #神转折 #高血压瞬间 #社区梗 |
 | A | 真人性 Authenticity | 是否有具体情境、真实情绪、口语术语混用、不完美表达 | #具体物理约束 #非完美逻辑 #主观视角 #深夜emo |
+
+```
+评估输入（对每个帖子构建评估上下文）：
+
+  帖子标题：{title}
+  帖子正文：{content_full_text}（截取前2000字）
+  配图数量：{image_count}
+  互动数据：回复 {reply_num} | 点赞 {like_num}
+  发布时间：{create_time}
+  所属贴吧：{tiebaname}
+
+  → 基于以上信息，独立给出 U / M / A 三个维度各 0-10 分
+  → 标注每个维度的命中标签（从典型标签池中选择，可自创）
+  → 给出一句话内容摘要
+```
 
 ### Phase 4：加精判定（三占其二原则）
 
@@ -230,7 +290,7 @@
 └─────────────┴───────────────────────────────────┘
 ```
 
-### Phase 5：输出报告 & 加精确认 & 执行加精
+### Phase 5：输出报告 & 加精确认与执行
 
 ```
 1. 生成结构化评选报告（见 Output Format）
@@ -251,182 +311,80 @@
    └─────────────────────────────────────────────────────────┘
 
    如果 auto_jajing=true → 跳过确认，直接全部加精
-```
 
-对每一篇确认加精的帖子，执行加精操作：
+4. 对每一篇确认加精的帖子，调用加精 API：
 
-```
-═══════════════════════════════════════════════════════════
-加精执行策略（三级方案，逐级尝试）
-═══════════════════════════════════════════════════════════
+   ═══════════════════════════════════════════════
+   API 加精执行流程
+   ═══════════════════════════════════════════════
 
-  优先级从高到低：
-  
-  方案 A（最优）：管理 API 直调 — 完全绕过 UI
-  方案 B（次优）：Vue 实例直调 permissionClick('good')
-  方案 C（兜底）：DOM 交互点击
+   对待加精列表中的每个帖子，依次执行：
 
-  ⚠️ 不要尝试任何旧版路径：
-     - ❌ lp=5011（旧版降级参数，已失效）
-     - ❌ bawu/admin（旧版管理后台，404）
-     - ❌ 经典版切换（新版不再支持）
+   ┌──────────────────────────────────────────────┐
+   │                                              │
+   │  Step 1: 构造加精请求                        │
+   │                                              │
+   │    POST https://tieba.baidu.com/mo/q/        │
+   │         bawusetthread                        │
+   │    Cookie: BDUSS={bduss}                     │
+   │    Content-Type: application/                │
+   │         x-www-form-urlencoded                │
+   │                                              │
+   │    Body:                                     │
+   │      word = {tiebaname}                      │
+   │      fid  = {fid}                            │
+   │      tid  = {当前帖子的tid}                   │
+   │      type = 1                                │
+   │      tbs  = {tbs}                            │
+   │                                              │
+   │  Step 2: 发送请求并解析响应                  │
+   │                                              │
+   │    响应 JSON:                                │
+   │    {"no": 0, "error": ""}      → ✅ 成功     │
+   │    {"no": X, "error": "..."}   → ❌ 失败     │
+   │                                              │
+   │  Step 3: 结果判定与记录                      │
+   │                                              │
+   │    ✅ no == 0:                               │
+   │       记录成功，输出实时反馈                  │
+   │                                              │
+   │    ❌ no != 0:                               │
+   │       解析 error 字段：                      │
+   │       ┌────────────────────────────────────┐ │
+   │       │ "没有权限" → 权限不足，暂停并提示  │ │
+   │       │ "已加精"   → 已是精华，跳过       │ │
+   │       │ "操作频繁" → 等待10秒后重试1次    │ │
+   │       │ 其他       → 记录错误，继续下一篇 │ │
+   │       └────────────────────────────────────┘ │
+   │                                              │
+   │  Step 4: 等待间隔                            │
+   │    正常间隔：2-3 秒                          │
+   │    遇到频率限制后：10 秒                     │
+   │                                              │
+   │  → 循环处理下一篇                            │
+   │                                              │
+   └──────────────────────────────────────────────┘
 
-═══════════════════════════════════════════════════════════
-方案 A（最优）：管理 API 直调
-═══════════════════════════════════════════════════════════
+   实时反馈格式：
+   🔄 (1/5) 正在加精：「帖子标题AAA」(tid: 12345)
+   ✅ (1/5) 加精成功：「帖子标题AAA」
+   🔄 (2/5) 正在加精：「帖子标题BBB」(tid: 12346)
+   ✅ (2/5) 加精成功：「帖子标题BBB」
+   🔄 (3/5) 正在加精：「帖子标题CCC」(tid: 12347)
+   ❌ (3/5) 加精失败：「帖子标题CCC」— API返回: 已加精
+   🔄 (4/5) 正在加精：「帖子标题DDD」(tid: 12348)
+   ⚠️ (4/5) 频率限制，等待10秒后重试...
+   ✅ (4/5) 重试成功：「帖子标题DDD」
+   🔄 (5/5) 正在加精：「帖子标题EEE」(tid: 12349)
+   ✅ (5/5) 加精成功：「帖子标题EEE」
+   ──────────────────────────────────
+   ✅ 加精执行完毕：成功 4 篇 / 失败 1 篇 / 共 5 篇
 
-  无需导航到帖子页面，直接在当前页面通过 API 完成加精。
+5. TBS 刷新策略：
 
-  Step 1: 获取 tbs（反 CSRF token）
-
-    const tbsResp = await fetch(
-      'https://tieba.baidu.com/dc/common/tbs',
-      { credentials: 'include' }
-    );
-    const tbsData = await tbsResp.json();
-    const tbs = tbsData.tbs;
-
-  Step 2: 调用加精 API
-
-    const formData = new URLSearchParams();
-    formData.append('ie', 'utf-8');
-    formData.append('word', '{tiebaname}');  // 贴吧名
-    formData.append('fid', '{forum_id}');     // 贴吧ID（从列表数据中获取）
-    formData.append('kw', '{tiebaname}');
-    formData.append('tbs', tbs);
-    formData.append('list[]', '{thread_id}'); // 帖子ID
-
-    const resp = await fetch(
-      'https://tieba.baidu.com/mo/q/bawuGoodThread',
-      {
-        method: 'POST',
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded'
-        },
-        body: formData.toString()
-      }
-    );
-    const result = await resp.json();
-
-    // 备选 API endpoint（如上述不可用）：
-    // POST https://tieba.baidu.com/c/c/bawu/addgoodthreads
-    // 参数: kz={thread_id}&tbs={tbs}&good=1
-
-  Step 3: 检查返回结果
-
-    if (result.no === 0 || result.error_code === 0) {
-      → ✅ 加精成功
-    } else {
-      → 记录错误信息，尝试方案 B
-    }
-
-═══════════════════════════════════════════════════════════
-方案 B（次优）：Vue 实例直调 permissionClick
-═══════════════════════════════════════════════════════════
-
-  当 API 方案返回错误（如接口变更/鉴权失败）时使用。
-  需要先导航到帖子详情页。
-
-  Step 1: 导航到目标帖子详情页
-    https://tieba.baidu.com/p/{thread_id}
-    等待页面完全加载
-
-  Step 2: 通过 Vue 实例调用加精
-
-    在浏览器中执行 JavaScript：
-
-    (function() {
-      // 定位主楼的 more-action 按钮
-      var moreBtn = document.querySelector(
-        '.action-bar-container.action-bar .more-action'
-      );
-      if (!moreBtn) return { success: false, error: 'more-action not found' };
-
-      // 向上遍历找到 Vue 实例
-      var el = moreBtn;
-      while (el && el.tagName !== 'BODY') {
-        if (el.__vue__) {
-          var parent = el.__vue__.$parent;
-          if (parent && typeof parent.permissionClick === 'function') {
-            // 确认 permissionList 中包含 'good'
-            var hasGood = parent.permissionList && 
-              parent.permissionList.some(item => item.action === 'good');
-            if (hasGood) {
-              parent.permissionClick('good');
-              return { success: true, method: 'permissionClick' };
-            } else {
-              return { success: false, error: 'no good permission' };
-            }
-          }
-          break;
-        }
-        el = el.parentElement;
-      }
-      return { success: false, error: 'Vue instance not found' };
-    })();
-
-  Step 3: 等待 1-2 秒，检测操作结果
-    - 检查页面是否出现成功 toast
-    - 检查帖子是否出现精华标记
-    - 如果失败 → 尝试方案 C
-
-═══════════════════════════════════════════════════════════
-方案 C（兜底）：DOM 交互点击
-═══════════════════════════════════════════════════════════
-
-  仅在方案 A、B 均失败时使用。
-  此时应已在帖子详情页。
-
-  Step 1: 点击主楼的「···」更多菜单按钮
-
-    var actionBars = document.querySelectorAll('.action-bar-container');
-    var firstBar = actionBars[0];  // 主楼
-    var moreBtn = firstBar.querySelector('.more-action');
-    moreBtn.click();
-
-  Step 2: 等待 500ms，检测弹出菜单
-
-    - 查找 DOM 中 popover 相关元素
-    - 如果菜单未出现：
-      → 查找所有 [class*="popover"] 或 [id*="popover"] 元素
-      → 检查其 innerHTML 是否包含"加精"
-      → 如包含但隐藏，尝试设置 display:block 强制显示
-
-  Step 3: 在菜单中定位并点击「加精」
-
-    - 遍历菜单项，找到文本精确包含"加精"的元素
-    - ⚠️ 安全检查：确认文本为"加精"后再点击
-    - ⚠️ 绝不点击 置顶 / 举报 / 封禁 / 删除
-
-  Step 4: 检测操作结果
-    - 成功 → 记录 ✅
-    - 失败 → 记录 ❌ 及具体原因
-
-═══════════════════════════════════════════════════════════
-操作节奏与实时反馈
-═══════════════════════════════════════════════════════════
-
-  操作间隔：每次加精操作间隔 2-3 秒，避免触发频率限制
-  
-  实时反馈格式：
-  
-  📍 正在处理：「帖子标题xxx」
-  🔧 尝试方案 A（API 直调）...
-  ✅ (1/5) 加精成功：「帖子标题xxx」
-
-  📍 正在处理：「帖子标题yyy」
-  🔧 尝试方案 A（API 直调）... ❌ API 返回错误
-  🔧 降级到方案 B（Vue 实例直调）...
-  ✅ (2/5) 加精成功：「帖子标题yyy」
-
-  📍 正在处理：「帖子标题zzz」
-  ⏭️ (3/5) 跳过：「帖子标题zzz」— 已是精华帖
-
-  ...
-
-  ──────────────────────────────────
-  ✅ 加精完成：成功 4 篇 / 失败 1 篇 / 共 5 篇
+   每执行 10 次加精操作后，重新调用 tbs API 刷新 token：
+   GET http://tieba.baidu.com/dc/common/tbs
+   → 更新 tbs 值，防止 token 过期导致后续操作失败
 ```
 
 ---
@@ -438,12 +396,13 @@
 
 > 📊 本次扫描范围：近3天 | 扫描帖子总数：XX | 推荐加精：XX 篇 | 已跳过精华：XX 篇
 > 🕐 报告生成时间：YYYY-MM-DD HH:MM
+> 🔑 认证方式：API（BDUSS）| TBS: {tbs前6位}***
 
 ---
 
 #### 1. 📌 帖子标题：[帖子标题]
 
-- 🔗 链接：[帖子URL]
+- 🔗 链接：https://tieba.baidu.com/p/{tid}
 - 📝 内容摘要：[一句话总结帖子核心内容]
 - 📊 U-M-A 评分：U(**X**分) - M(**X**分) - A(**X**分)
 - 🏷️ 命中标签：#标签1 #标签2 #标签3
@@ -464,43 +423,57 @@
 |---|---------|---|---|---|------|---------|
 | 1 | xxx     | 9 | 5 | 8 | 🔧经验库 | ✅ 已加精 |
 | 2 | xxx     | 6 | 9 | 8 | 🔥情绪场 | ✅ 已加精 |
-| 3 | xxx     | 9 | 8 | 9 | 👑神帖   | ❌ 加精失败(原因) |
+| 3 | xxx     | 9 | 8 | 9 | 👑神帖   | ❌ 加精失败(API: 已加精) |
 | 4 | xxx     | 8 | 4 | 9 | 🔧经验库 | ⏭️ 用户跳过 |
 | 5 | xxx     | 5 | 5 | 5 | -       | 🚫 未达标 |
 
 ### 📈 执行摘要
 
 - ✅ 成功加精：X 篇
-- ❌ 加精失败：X 篇
+- ❌ 加精失败：X 篇（含具体原因）
 - ⏭️ 用户跳过：X 篇
 - 🚫 未达标：X 篇
+
+### 🔧 API 调用统计
+
+- 认证验证：1 次
+- 贴吧定位：1 次
+- 帖子列表：X 页
+- 帖子详情：X 次
+- 加精操作：X 次（成功 X / 失败 X / 重试 X）
+- TBS 刷新：X 次
 ```
 
 ---
 
 ## Examples
 
-### Example 1 — 评选 + 加精完整流程
+### Example 1 — 完整流程（提供了 BDUSS）
 
-- 用户输入："帮我看看反抓虾吧最近有什么好帖子，好的帮我加精"
-- 期望行为：✅ 调用此 skill → 访问反抓虾吧 → 权限预检 → API 抓取帖子 → UMA 评估 → 输出报告 → 请求确认 → API 直调加精
+- 用户输入："帮我看看反抓虾吧最近有什么好帖子，好的帮我加精。BDUSS 是 xxxxx"
+- 期望行为：✅ 调用此 skill → 验证 BDUSS → 获取 TBS → 定位贴吧 FID → 获取帖子列表+详情 → UMA 评估 → 输出报告 → 请求确认 → API 调用加精
 
-### Example 2 — 触发登录提醒
+### Example 2 — 未提供 BDUSS
 
-- 用户输入："去图拉丁之家吧筛选精华帖并加精"
-- 期望行为：✅ 调用此 skill → 检测到扫码登录弹窗 → 暂停并提醒用户扫码 → 登录完成后自动继续
+- 用户输入："帮我给图拉丁之家吧的好帖子加精"
+- 期望行为：✅ 调用此 skill → 检测未提供 BDUSS → 输出获取指引 → 等待用户提供 → 获取后继续完整流程
 
-### Example 3 — 无管理权限
+### Example 3 — BDUSS 过期
+
+- 用户提供了 BDUSS，但 tbs API 返回 is_login=0
+- 期望行为：✅ 提示 BDUSS 无效/过期 → 要求用户重新获取
+
+### Example 4 — 无管理权限
 
 - 用户输入："帮我给机械键盘吧的好帖子加精"
-- 期望行为：✅ 调用此 skill → 权限预检发现无管理权限 → 提示权限不足 → 询问是否仅评选
+- 期望行为：✅ 正常完成评选 → 首次加精 API 返回权限错误 → 提示权限不足 → 询问是否仅保留报告
 
-### Example 4 — 不应调用
+### Example 5 — 不应调用
 
 - 用户输入："帮我在 XX 吧发一个帖子"
 - 期望行为：❌ 不调用此 skill（发帖为创作类写操作，超出能力范围）
 
-### Example 5 — 不应调用
+### Example 6 — 不应调用
 
 - 用户输入："Reddit 上 r/MechanicalKeyboards 最近有什么好帖子？"
 - 期望行为：❌ 不调用此 skill（目标平台非百度贴吧）
@@ -511,19 +484,20 @@
 
 | 异常场景 | 处理策略 |
 |----------|----------|
-| 扫码登录拦截 | 暂停任务 → 弹出提醒 → 轮询等待登录完成 → 自动恢复 |
-| 无吧务管理权限 | 提示用户 → 询问是否切换为"仅评选"模式继续 |
-| Vue 实例探测中 permissionList 不含 'good' | 权限不足（可能是小吧主非大吧主），告知用户并降级为仅评选 |
-| API 加精返回错误 | 降级到方案 B（Vue 直调），再失败降级到方案 C（DOM 点击） |
-| 方案 A/B/C 全部失败 | 记录 ❌ 及三种方案的具体错误信息，继续处理下一篇 |
-| Tieba Claw API 不可用 | 降级为浏览器页面 bodyText 解析（不使用旧版选择器） |
-| 帖子已是精华帖 | 跳过，在报告中标记"已是精华" |
-| 操作频率被限制 | 自动增加间隔至 5-10 秒，重试一次 |
-| 贴吧不存在 / 名称错误 | 提示用户确认贴吧名称，给出相似贴吧建议 |
-| 页面加载超时 | 重试 2 次，仍失败则报告网络问题 |
-| 近3天无新帖 | 告知用户该时间段无新内容，建议扩大时间范围 |
-| 登录后仍无法访问（私密吧等） | 告知用户该贴吧访问受限，无法执行任务 |
-| tbs 获取失败 | 提示可能未登录或 cookie 过期，建议重新登录 |
+| BDUSS 未提供 | 输出获取指引（含图文步骤），等待用户提供 |
+| BDUSS 无效 / 过期 | tbs API 返回 is_login=0 → 提示重新获取，给出步骤 |
+| TBS 获取失败 | 重试 2 次，仍失败则提示网络问题或 BDUSS 问题 |
+| 贴吧不存在 / FID 获取失败 | 提示确认名称，给出相似贴吧建议（如有） |
+| 帖子列表 API 返回空 | 确认贴吧是否私密/被封，或近期确实无新帖 |
+| 帖子详情 API 获取失败 | 单帖失败不中断，标记该帖"内容获取失败"，基于标题+摘要评估 |
+| 加精 API 返回权限错误 | 首次遇到时暂停 → 提示权限不足 → 降级为仅评选模式 |
+| 加精 API 返回"已加精" | 跳过该帖，在报告中标记"已是精华" |
+| 加精 API 返回"操作频繁" | 等待 10 秒后重试 1 次；仍失败则记录并跳过 |
+| 加精 API 返回其他错误 | 记录具体 error 信息到报告，继续处理下一篇 |
+| TBS 过期（连续加精失败） | 自动重新获取 TBS 后重试 |
+| 网络超时 | 单次请求超时 10 秒，重试 2 次，仍失败则报告网络问题 |
+| 近3天无新帖 | 告知用户，建议扩大时间范围（可选7天/30天） |
+| 私密吧/被封禁吧 | API 返回异常 → 告知用户该贴吧无法访问 |
 
 ---
 
@@ -532,25 +506,20 @@
 ```
 ⚠️ 安全约束：
 
-1. 加精前必须经过用户确认（除非显式设置 auto_jajing=true）
-2. 绝不执行 "删贴" 或 "封禁" 操作，即使菜单中可见或 API 可调
-3. 单次任务加精上限：20 篇（防止误操作大批量加精）
-4. 每次加精操作前二次检查帖子标题/ID，确保与评选报告一致
-5. 操作全程记录日志，便于用户事后审计
-6. API 调用仅限加精相关接口，不调用删除、封禁等管理接口
-7. 不尝试任何旧版/经典版降级路径（lp=5011、bawu/admin 等均已失效）
-```
+1. BDUSS 安全：
+   - 明确告知用户 BDUSS 等同于登录密码
+   - 仅在当前会话的 API 调用中使用，不存储、不日志记录、不传输至第三方
+   - 任务完成后建议用户修改密码使 BDUSS 失效
 
----
+2. 操作安全：
+   - 加精前必须经过用户确认（除非显式设置 auto_jajing=true）
+   - API 调用仅使用 type=1（加精），绝不发送 type=0（取消加精）除非用户明确要求
+   - 绝不调用删帖、封禁等其他管理 API
+   - 单次任务加精上限：20 篇（防止误操作大批量加精）
 
-## Dependencies
+3. 操作核验：
+   - 每次加精前二次核对 tid 与帖子标题的对应关系
+   - API 调用前在实时反馈中展示目标帖子信息，给用户最后确认窗口
 
-- 需要浏览器环境（OpenClaw 浏览器插件）
-- 需要能执行页面 JavaScript / 发起 fetch 请求 / 操作 DOM
-- 当前登录账号需具有目标贴吧的**吧务管理权限**（大吧主/小吧主）才能执行加精
-- 本技能涉及的写操作**仅限于"加精"**，不执行删贴、封禁、置顶等其他管理操作
-- 目标贴吧为 Vue SPA 新版架构，所有操作适配新版
-
-## Tags
-
-#百度贴吧 #内容评选 #精华帖 #加精操作 #社区治理 #浏览器自动化 #UMA模型 #VueSPA #API直调
+4. 频率控制：
+   - 
